@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-pixelgrid-helpers"
+description = "A suite of nodes for pixel art: color quantization, palette enforcement, median filtering and grid logic."
+version = "1.0.0"
+license = { text = "MIT" }
+dependencies = [] 
+
+[project.urls]
+Repository = "https://github.com/molbal/ComfyUI-PixelGridHelpers" 
+
+[tool.comfy]
+PublisherId = "molbal" 
+DisplayName = "Pixel Grid Helpers"
+Icon = "https://raw.githubusercontent.com/molbal/ComfyUI-PixelGridHelpers/refs/heads/master/assets/icon.png"
