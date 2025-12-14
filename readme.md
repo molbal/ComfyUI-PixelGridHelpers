@@ -12,9 +12,9 @@ A suite of custom nodes for ComfyUI designed to assist with pixelized image gene
 ### Method 2: Manual Installation
 1. Navigate to your ComfyUI `custom_nodes` directory.
 2. Clone this repository:
-   ```bash
+```bash
    git clone https://github.com/molbal/ComfyUI-PixelGridHelpers.git
-````
+```
 
 ### Method 3: Comfy CLI Installation
 1. Go to the ComfyUI Root directory
