@@ -8,6 +8,37 @@ def hex_to_rgb(hex_str):
 def rgb_to_hex(rgb):
     return '#{:02x}{:02x}{:02x}'.format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
 
+class PixelGrid_CreateSolidColorImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 512, "min": 1, "max": 8192}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 8192}),
+                "hex_code": ("STRING", {"default": "#FF0000"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "create_image"
+    CATEGORY = "Pixel Grid Helpers"
+
+    def create_image(self, width, height, hex_code):
+        match = re.fullmatch(r"#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})", hex_code.strip())
+        if match is None:
+            raise ValueError(
+                f"Invalid HEX color {hex_code!r}; use 3 or 6 hexadecimal digits."
+            )
+
+        digits = match.group(1)
+        if len(digits) == 3:
+            digits = "".join(digit * 2 for digit in digits)
+        rgb = [int(digits[index:index + 2], 16) for index in (0, 2, 4)]
+        color = torch.tensor(rgb, dtype=torch.float32).div_(255).view(1, 1, 1, 3)
+        image = color.expand(1, height, width, 3).clone()
+        return (image,)
+
 class PixelGrid_KMeans:
     """Node 1: Enforce Max N Colors (K-Means Quantization)"""
     @classmethod
@@ -229,7 +260,8 @@ class PixelGrid_PaletteToImage:
 
 # Re-including the previous node requested
 class GridMedianFixer:
-    """Previous Node: Median Filter for Logic Grids"""
+    """Median-reduce an image using the most coherent pixel-grid phase."""
+
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -238,21 +270,134 @@ class GridMedianFixer:
                 "grid_size": ("INT", {"default": 6, "min": 1, "max": 128}),
             }
         }
+
     RETURN_TYPES = ("IMAGE", "IMAGE")
     RETURN_NAMES = ("downscaled_image", "original_size_image")
     FUNCTION = "process_grid"
     CATEGORY = "Pixel Grid Helpers"
 
+    @staticmethod
+    def _phase_downscaled(image, grid_size, y_offset, x_offset):
+        batch, height, width, channels = image.shape
+        rows = max((height - y_offset) // grid_size, 0)
+        columns = max((width - x_offset) // grid_size, 0)
+        end_y = y_offset + rows * grid_size
+        end_x = x_offset + columns * grid_size
+        cropped = image[:, y_offset:end_y, x_offset:end_x, :]
+
+        blocks = cropped.reshape(
+            batch, rows, grid_size, columns, grid_size, channels
+        ).permute(0, 1, 3, 2, 4, 5)
+        blocks = blocks.reshape(
+            batch, rows, columns, grid_size * grid_size, channels
+        )
+        return torch.median(blocks, dim=3).values
+
+    @classmethod
+    def _phase_outputs(cls, image, grid_size, y_offset, x_offset):
+        downscaled = cls._phase_downscaled(
+            image, grid_size, y_offset, x_offset
+        )
+        upscaled = downscaled.repeat_interleave(grid_size, dim=1).repeat_interleave(
+            grid_size, dim=2
+        )
+        return downscaled, upscaled
+
+    @staticmethod
+    def _common_phase_bounds(length, grid_size):
+        valid_offsets = [
+            offset
+            for offset in range(grid_size)
+            if length - offset >= grid_size
+        ]
+        if not valid_offsets:
+            return 0, 0
+
+        start = valid_offsets[-1]
+        end = min(
+            offset + ((length - offset) // grid_size) * grid_size
+            for offset in valid_offsets
+        )
+        return start, end
+
+    @staticmethod
+    def _phase_error(
+        image,
+        grid_size,
+        y_offset,
+        x_offset,
+        score_top,
+        score_bottom,
+        score_left,
+        score_right,
+    ):
+        batch, _, _, channels = image.shape
+        first_row = (score_top - y_offset) // grid_size
+        last_row = (score_bottom - 1 - y_offset) // grid_size + 1
+        first_column = (score_left - x_offset) // grid_size
+        last_column = (score_right - 1 - x_offset) // grid_size + 1
+
+        block_top = y_offset + first_row * grid_size
+        block_bottom = y_offset + last_row * grid_size
+        block_left = x_offset + first_column * grid_size
+        block_right = x_offset + last_column * grid_size
+        rows = last_row - first_row
+        columns = last_column - first_column
+        score_pixels = image[:, block_top:block_bottom, block_left:block_right, :]
+        blocks = score_pixels.reshape(
+            batch, rows, grid_size, columns, grid_size, channels
+        ).permute(0, 1, 3, 2, 4, 5)
+        blocks = blocks.reshape(
+            batch, rows, columns, grid_size * grid_size, channels
+        )
+        score_medians = torch.median(blocks, dim=3).values
+        aligned_region = score_medians.repeat_interleave(
+            grid_size, dim=1
+        ).repeat_interleave(grid_size, dim=2)
+
+        local_top = score_top - block_top
+        local_left = score_left - block_left
+        region_height = score_bottom - score_top
+        region_width = score_right - score_left
+        aligned_region = aligned_region[
+            :, local_top:local_top + region_height,
+            local_left:local_left + region_width, :
+        ]
+        source_region = image[:, score_top:score_bottom, score_left:score_right, :]
+        error = source_region.to(torch.float32) - aligned_region.to(torch.float32)
+        return error.abs().mean()
+
     def process_grid(self, image, grid_size):
-        B, H, W, C = image.shape
-        h_mod, w_mod = H % grid_size, W % grid_size
-        if h_mod > 0 or w_mod > 0:
-            image = image[:, :H-h_mod, :W-w_mod, :]
-            B, H, W, C = image.shape
-            
-        reshaped = image.view(B, H // grid_size, grid_size, W // grid_size, grid_size, C)
-        permuted = reshaped.permute(0, 1, 3, 2, 4, 5)
-        flattened = permuted.reshape(B, H // grid_size, W // grid_size, grid_size * grid_size, C)
-        downscaled, _ = torch.median(flattened, dim=3)
-        upscaled = downscaled.repeat_interleave(grid_size, dim=1).repeat_interleave(grid_size, dim=2)
-        return (downscaled, upscaled)
+        if grid_size < 1:
+            raise ValueError("grid_size must be at least 1")
+
+        _, height, width, _ = image.shape
+        with torch.no_grad():
+            if height < grid_size or width < grid_size:
+                return self._phase_outputs(image, grid_size, 0, 0)
+
+            score_top, score_bottom = self._common_phase_bounds(height, grid_size)
+            score_left, score_right = self._common_phase_bounds(width, grid_size)
+            phases = []
+            scores = []
+
+            y_offsets = range(min(grid_size, height - grid_size + 1))
+            x_offsets = range(min(grid_size, width - grid_size + 1))
+            for y_offset in y_offsets:
+                for x_offset in x_offsets:
+                    score = self._phase_error(
+                        image,
+                        grid_size,
+                        y_offset,
+                        x_offset,
+                        score_top,
+                        score_bottom,
+                        score_left,
+                        score_right,
+                    )
+                    phases.append((y_offset, x_offset))
+                    scores.append(score)
+
+            best_index = torch.argmin(torch.stack(scores)).item()
+            best_y, best_x = phases[best_index]
+            return self._phase_outputs(image, grid_size, best_y, best_x)

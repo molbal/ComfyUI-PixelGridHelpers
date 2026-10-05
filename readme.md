@@ -136,9 +136,20 @@ to Preview Image or Save Image.
 Clean up enlarged pixel art with noisy or uneven pixel blocks. Use this when
 each logical pixel occupies a known square block, such as 6 by 6 image pixels.
 
-Set `grid_size` to the block size. Use `downscaled_image` for native-resolution
-editing, or `original_size_image` to keep the enlarged appearance with solid blocks.
-Edges that do not fit a complete block are cropped.
+Set `grid_size` to the block size. The node tests each horizontal and vertical
+grid offset that leaves at least one complete block, then chooses the alignment
+with the lowest mean absolute RGB error from each pixel to its block median.
+This favors alignments where pixels within each logical block are most
+consistent; equal scores prefer the top-left alignment. Scoring uses the region
+covered by all candidate alignments, so incomplete edge fragments do not bias
+the comparison.
+
+The selected leading offset and any incomplete trailing blocks are cropped.
+Use `downscaled_image` for native-resolution editing, or `original_size_image`
+to keep the selected grid enlarged as solid blocks. Output dimensions can differ
+from the input. The exhaustive phase search costs `grid_size` squared candidate
+alignments, so larger block sizes take longer; scoring runs on the input device,
+including the GPU when available.
 
 | Input | Usage |
 | --- | --- |
@@ -208,12 +219,28 @@ Different HEX colors can receive the same name; each name appears only once.
 Colors without an exact named match receive the closest available name.
 Whitespace and empty entries are ignored; malformed HEX colors raise an error.
 
+### 9. Pixel Grid: Create Solid Color Image
+
+Create an image filled with one HEX color. Set the output dimensions and enter
+a three- or six-digit HEX color, with or without the leading `#`.
+
+| Input | Usage |
+| --- | --- |
+| `width` | Output image width in pixels. |
+| `height` | Output image height in pixels. |
+| `hex_code` | HEX color to fill the image with; default: `#FF0000`. |
+
+| Output | Usage |
+| --- | --- |
+| `image` | The generated solid-color image. |
+
 ## Example Workflows
 
 - **Clean generated pixel art:** Image -> Autofixer -> Preview Image or Save Image.
 - **Reuse a reference palette:** Reference image -> Analyze Palette -> Enforce Palette's `hex_palette`; connect your artwork to Enforce Palette's `image`.
 - **Inspect and describe colors:** Connect any `hex_palette` output to Palette to Image for swatches and HEX to Color Names for readable names.
 - **Recover a known pixel grid:** Image -> Median Fixer -> use `downscaled_image` for editing or `original_size_image` for an enlarged result.
+- **Create a flat background:** Create Solid Color Image -> Preview Image or combine it with another image.
 
 ## Attribution
 
